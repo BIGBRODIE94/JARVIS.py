@@ -84,14 +84,14 @@ def sendEmail(to, content):
     server = smtplib.SMTP('smtp.gmail.com', 587)
     server.ehlo()
     server.starttls()
-    server.login('affanc666@gmail.com', 'dubkix-fitqId-2jyfbu')
-    server.sendmail('aac140930@utdallas.edu', to, content)
+    server.login('youemail@gmail.com', 'password')
+    server.sendmail('receipeentemail@email.com', to, content)
     server.close()
 
 
 def screenshot():
     img = pyautogui.screenshot()
-    img.save('/Users/affanchowdhury/Downloads/')
+    img.save('Directory address goes here')
 
 
 def cpu():
@@ -126,7 +126,7 @@ if __name__ == '__main__':
             try:
                 speak("What is the message i should say?")
                 content = takeCommand()
-                to = 'aac140930@utdallas.edu'
+                to = 'email'
                 sendEmail(to, content)
                 # speak("Email Sent")
                 speak("Email has been sent successfully")
