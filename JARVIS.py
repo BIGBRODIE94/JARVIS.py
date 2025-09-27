@@ -33,9 +33,10 @@ def time():
 
 def date():
     # engine.say("Today\'s date is")
-    year = str(datetime.datetime.now().year)
-    month = str(datetime.datetime.now().month)
-    calender = str(datetime.datetime.now().day)
+    now = datetime.datetime.now()
+    year = str(now.year)
+    month = str(now.month)
+    calender = str(now.day)
     speak("the current date is")
     speak(month)
     speak(calender)
