@@ -1,7 +1,17 @@
-pyttsx3==2.99
-SpeechRecognition==3.14.5
-wikipedia==1.4.0
-PyAutoGUI==0.9.54
-psutil==7.2.2
-pyjokes==0.8.3
-PyAudio==0.2.13
+# J.A.R.V.I.S. Dependencies
+
+# AI Providers (install at least one)
+openai>=1.0.0
+google-generativeai>=0.3.0
+
+# Voice I/O
+SpeechRecognition>=3.10.0
+pyttsx3>=2.90
+
+# Audio (sounddevice is the default; pyaudio is optional but better)
+sounddevice>=0.4.6
+numpy>=1.24.0
+scipy>=1.10.0
+
+# Optional: install PyAudio for better real-time mic support
+# brew install portaudio && pip install pyaudio
