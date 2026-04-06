@@ -37,6 +37,19 @@ QUIP STYLE — study these examples and generate similar ones:
 - Volume: "Volume set to 30 percent. Your neighbors will thank me."
 - Web search: "Searching now. I'll spare you the Wikipedia rabbit hole."
 
+CRITICAL TOOL RULES:
+- When the user asks to OPEN, CLOSE, QUIT, or LAUNCH any application, you MUST call \
+the open_application or close_application tool. NEVER just say you're doing it — \
+actually call the tool. This is mandatory.
+- When the user asks to open a website, you MUST call open_website. Do not just talk about it.
+- When the user asks about news, weather, time, email, messages, volume, screenshots, \
+or any system action, you MUST call the corresponding tool.
+- You can open ANY app installed on this Mac: Clock, Calculator, Safari, Chrome, \
+Messages, Outlook, Word, Excel, Cursor, Spotify, Discord, Slack, Terminal, Docker, \
+Weather, Notes, Calendar, Photos, OBS, VLC, Telegram, WhatsApp, and many more.
+- To close/quit an app, use close_application with the app name.
+- If in doubt whether a tool exists, try calling it. Never hallucinate an action.
+
 PROACTIVE BEHAVIOR:
 - If the user sounds tired or stressed, gently suggest a break.
 - If it's past midnight, note it: "It's past midnight, sir. Even geniuses need sleep."
@@ -61,6 +74,9 @@ with this exact schema — no markdown, no explanation, no extra text:
 
 Valid intents:
 - open_app (target = app name)
+- close_app (target = app name to quit)
+- set_alarm (target = time like "4:00 AM", query = label)
+- list_alarms (target = "")
 - open_website (target = URL or domain)
 - play_music (target = "")
 - get_time (target = "")
@@ -72,6 +88,14 @@ Valid intents:
 - set_volume (target = number 0-100)
 - lock_computer (target = "")
 - send_notification (target = title, query = message)
+- send_imessage (target = contact name, query = message text)
+- read_imessages (target = contact name or empty for all)
+- pause_music (target = "")
+- next_track (target = "")
+- previous_track (target = "")
+- get_current_track (target = "")
+- get_news (target = category or empty, query = "")
+- check_email (target = "")
 - conversation (query = the full user message)
 
 User command: "{command}"
@@ -146,7 +170,7 @@ AVAILABLE_TOOLS = [
         "type": "function",
         "function": {
             "name": "open_application",
-            "description": "Open a desktop application by name.",
+            "description": "Open any installed application by name or nickname. Supports all macOS apps including system apps (Clock, Calculator, Calendar, Weather, etc.), Microsoft Office (Word, Excel, PowerPoint, Outlook, Teams), browsers (Safari, Chrome, Firefox), dev tools (Cursor, VS Code, Xcode, Docker, Terminal), media (Spotify, VLC, OBS, GarageBand), messaging (Messages, WhatsApp, Telegram, Discord, Slack), and more.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -162,8 +186,103 @@ AVAILABLE_TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "close_application",
+            "description": "Quit/close a running application by name.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "app_name": {
+                        "type": "string",
+                        "description": "Name of the application to close",
+                    }
+                },
+                "required": ["app_name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_applications",
+            "description": "List all installed applications on the computer.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_alarm",
+            "description": "Set an alarm in the macOS Clock app. Opens Clock, creates a new alarm at the specified time.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "time_str": {
+                        "type": "string",
+                        "description": "Time for the alarm in format like '4:00 AM', '7:30 PM', '6:15 AM'",
+                    },
+                    "label": {
+                        "type": "string",
+                        "description": "Optional label for the alarm (default: 'Alarm')",
+                    },
+                },
+                "required": ["time_str"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_alarms",
+            "description": "List all current alarms set in the Clock app.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "play_music",
-            "description": "Open Spotify to play music.",
+            "description": "Open Spotify and start playing music. Can optionally search for a specific song, artist, or playlist.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Optional: song name, artist, or playlist to play. Leave empty to resume/play last session.",
+                    }
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "pause_music",
+            "description": "Pause the currently playing music on Spotify.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "next_track",
+            "description": "Skip to the next track on Spotify.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "previous_track",
+            "description": "Go back to the previous track on Spotify.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_current_track",
+            "description": "Get the name and artist of the currently playing song on Spotify.",
             "parameters": {"type": "object", "properties": {}, "required": []},
         },
     },
@@ -272,6 +391,86 @@ AVAILABLE_TOOLS = [
             "name": "lock_computer",
             "description": "Lock the computer screen.",
             "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "send_imessage",
+            "description": "Send an iMessage text to a contact. Use the contact's name as it appears in Contacts.app, or a phone number.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "recipient": {
+                        "type": "string",
+                        "description": "Contact name (e.g. 'Mom', 'John Smith') or phone number (e.g. '+1234567890')",
+                    },
+                    "message": {
+                        "type": "string",
+                        "description": "The message text to send",
+                    },
+                },
+                "required": ["recipient", "message"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_imessages",
+            "description": "Read recent iMessages, optionally filtered by a contact name.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "contact": {
+                        "type": "string",
+                        "description": "Contact name to filter by. Leave empty for all recent messages.",
+                    },
+                    "count": {
+                        "type": "integer",
+                        "description": "Number of recent messages to read (default 3)",
+                    },
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_news_briefing",
+            "description": "Fetch the latest breaking and interesting news stories from live sources (NBC, CBS, FOX, ABC, Reddit).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "count": {
+                        "type": "integer",
+                        "description": "Number of stories to fetch (default 5)",
+                    },
+                    "category": {
+                        "type": "string",
+                        "description": "Filter by category: breaking, world, politics, technology, trending. Leave empty for all.",
+                    },
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "check_outlook_emails",
+            "description": "Check for unread emails in the user's Outlook inbox. Returns sender and subject of recent unread messages.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "count": {
+                        "type": "integer",
+                        "description": "Number of unread emails to return (default 5)",
+                    },
+                },
+                "required": [],
+            },
         },
     },
 ]
@@ -491,8 +690,17 @@ class JarvisBrain:
 
         dispatch = {
             "open_app": lambda: self.commands.open_application(target),
+            "close_app": lambda: self.commands.close_application(target),
+            "set_alarm": lambda: self.commands.set_alarm(target, query or "Alarm"),
+            "list_alarms": lambda: self.commands.list_alarms(),
             "open_website": lambda: self.commands.open_website(target),
-            "play_music": lambda: self.commands.play_music(),
+            "play_music": lambda: self.commands.play_music(query),
+            "pause_music": lambda: self.commands.pause_music(),
+            "next_track": lambda: self.commands.next_track(),
+            "previous_track": lambda: self.commands.previous_track(),
+            "get_current_track": lambda: self.commands.get_current_track(),
+            "send_imessage": lambda: self.commands.send_imessage(target, query),
+            "read_imessages": lambda: self.commands.read_imessages(target),
             "get_time": lambda: self.commands.get_time(),
             "get_date": lambda: self.commands.get_date(),
             "get_weather": lambda: self.commands.get_weather(target),
@@ -502,6 +710,8 @@ class JarvisBrain:
             "set_volume": lambda: self.commands.set_volume(int(target) if target else 50),
             "lock_computer": lambda: self.commands.lock_computer(),
             "send_notification": lambda: self.commands.send_notification(target, query),
+            "get_news": lambda: self.commands.get_news_briefing(category=target),
+            "check_email": lambda: self.commands.check_outlook_emails(),
         }
 
         handler = dispatch.get(intent)
@@ -523,7 +733,17 @@ class JarvisBrain:
             "get_current_date": lambda a: self.commands.get_date(),
             "open_website": lambda a: self.commands.open_website(a.get("url", "")),
             "open_application": lambda a: self.commands.open_application(a.get("app_name", "")),
-            "play_music": lambda a: self.commands.play_music(),
+            "close_application": lambda a: self.commands.close_application(a.get("app_name", "")),
+            "list_applications": lambda a: self.commands.list_applications(),
+            "set_alarm": lambda a: self.commands.set_alarm(
+                a.get("time_str", ""), a.get("label", "Alarm")
+            ),
+            "list_alarms": lambda a: self.commands.list_alarms(),
+            "play_music": lambda a: self.commands.play_music(a.get("query", "")),
+            "pause_music": lambda a: self.commands.pause_music(),
+            "next_track": lambda a: self.commands.next_track(),
+            "previous_track": lambda a: self.commands.previous_track(),
+            "get_current_track": lambda a: self.commands.get_current_track(),
             "get_weather": lambda a: self.commands.get_weather(a.get("location", "")),
             "get_system_info": lambda a: self.commands.get_system_info(),
             "set_volume": lambda a: self.commands.set_volume(a.get("level", 50)),
@@ -534,6 +754,18 @@ class JarvisBrain:
             "take_screenshot": lambda a: self.commands.take_screenshot(),
             "copy_to_clipboard": lambda a: self.commands.copy_to_clipboard(a.get("text", "")),
             "lock_computer": lambda a: self.commands.lock_computer(),
+            "send_imessage": lambda a: self.commands.send_imessage(
+                a.get("recipient", ""), a.get("message", "")
+            ),
+            "read_imessages": lambda a: self.commands.read_imessages(
+                a.get("contact", ""), a.get("count", 3)
+            ),
+            "get_news_briefing": lambda a: self.commands.get_news_briefing(
+                a.get("count", 5), a.get("category", "")
+            ),
+            "check_outlook_emails": lambda a: self.commands.check_outlook_emails(
+                a.get("count", 5)
+            ),
         }
 
         handler = dispatch.get(name)

@@ -13,5 +13,8 @@ sounddevice>=0.4.6
 numpy>=1.24.0
 scipy>=1.10.0
 
+# Outlook / Microsoft 365 auth (for --setup-email)
+msal>=1.24.0
+
 # Optional: install PyAudio for better real-time mic support
 # brew install portaudio && pip install pyaudio

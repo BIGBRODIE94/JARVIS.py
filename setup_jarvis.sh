@@ -94,10 +94,7 @@ cat > "$PLIST_PATH" << PLIST
     <true/>
 
     <key>KeepAlive</key>
-    <dict>
-        <key>SuccessfulExit</key>
-        <false/>
-    </dict>
+    <true/>
 
     <key>StandardOutPath</key>
     <string>${JARVIS_HOME}/daemon-stdout.log</string>

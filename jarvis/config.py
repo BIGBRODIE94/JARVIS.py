@@ -12,7 +12,8 @@ PID_FILE = JARVIS_DIR / "jarvis.pid"
 
 DEFAULT_CONFIG = {
     "user_name": "BigBrodie",
-    "wake_words": ["wake up", "hey jarvis", "jarvis"],
+    "wake_words": ["jarvis"],
+    "wake_display_phrase": "Jarvis",
     "ai_provider": "openai",
     "ai_model": "gpt-4o-mini",
     "api_keys": {
@@ -29,12 +30,14 @@ DEFAULT_CONFIG = {
         "volume": 1.0
     },
     "speech_recognition": {
-        "energy_threshold": 300,
+        "energy_threshold": 120,
         "pause_threshold": 0.8,
         "phrase_time_limit": 15,
-        "wake_phrase_limit": 3
+        "wake_phrase_limit": 8,
+        "wake_listen_timeout": 20,
+        "wake_max_speech_seconds": 8.0
     },
-    "wake_method": "both",
+    "wake_method": "voice",
     "clap": {
         "spike_multiplier": 8.0,
         "min_gap": 0.15,
@@ -43,7 +46,17 @@ DEFAULT_CONFIG = {
     "behavior": {
         "greet_on_wake": True,
         "announce_time": True,
-        "sleep_after_idle": 180
+        "sleep_after_idle": 180,
+        "custom_wake_speech": (
+            "Welcome Home sir congratulations on the opening ceremony"
+        ),
+        "wake_requires_jarvis_keyword": True,
+        "wake_jarvis_aliases": ["jervis", "jarvus"],
+        "periodic_status_enabled": False,
+        "follow_up_probability": 0.0,
+        "voice_acknowledge_before_actions": False,
+        "silent_idle_standby": True,
+        "speak_on_repeat_wake": False
     }
 }
 
@@ -75,6 +88,14 @@ class JarvisConfig:
     def save(self):
         with open(CONFIG_FILE, "w") as f:
             json.dump(self.config, f, indent=2)
+
+    def wake_banner_text(self):
+        """Phrase shown in UI / standby prompts (preserves capitalization you set)."""
+        explicit = self.get("wake_display_phrase")
+        if explicit:
+            return explicit
+        words = self.get("wake_words", default=[])
+        return words[0].title() if words else "Wake up"
 
     def get(self, *keys, default=None):
         value = self.config

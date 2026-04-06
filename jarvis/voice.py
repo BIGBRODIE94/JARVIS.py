@@ -4,6 +4,7 @@ import logging
 import os
 import platform
 import random
+import re
 import subprocess
 import tempfile
 import time
@@ -22,21 +23,20 @@ except ImportError:
     _HAS_PYAUDIO = False
 
 
-MIN_ENERGY_THRESHOLD = 300
+MIN_ENERGY_THRESHOLD = 50
 
 
 class JarvisVoice:
     def __init__(self, config):
         self.config = config
         self.recognizer = sr.Recognizer()
-        self.recognizer.energy_threshold = max(
-            MIN_ENERGY_THRESHOLD,
-            config.get("speech_recognition", "energy_threshold", default=300),
+        self.recognizer.energy_threshold = config.get(
+            "speech_recognition", "energy_threshold", default=150
         )
         self.recognizer.pause_threshold = config.get(
-            "speech_recognition", "pause_threshold", default=0.8
+            "speech_recognition", "pause_threshold", default=1.0
         )
-        self.recognizer.dynamic_energy_threshold = False
+        self.recognizer.dynamic_energy_threshold = True
 
         self._tts_engine = config.get("voice", "engine", default="macos")
         self._pyttsx3 = None
@@ -69,11 +69,15 @@ class JarvisVoice:
         self.speak(random.choice(ACKNOWLEDGEMENTS))
 
     def maybe_follow_up(self):
-        """30% chance to offer a follow-up after responding."""
-        if random.random() < 0.3:
-            from jarvis.brain import FOLLOW_UPS
-            time.sleep(0.5)
-            self.speak(random.choice(FOLLOW_UPS))
+        """Optionally offer a follow-up after responding (default: off)."""
+        prob = float(
+            self.config.get("behavior", "follow_up_probability", default=0.0)
+        )
+        if prob <= 0 or random.random() > prob:
+            return
+        from jarvis.brain import FOLLOW_UPS
+        time.sleep(0.5)
+        self.speak(random.choice(FOLLOW_UPS))
 
     # ── Text-to-Speech ──────────────────────────────────────────
 
@@ -100,44 +104,167 @@ class JarvisVoice:
         except Exception as e:
             logger.error(f"TTS error: {e}")
 
-    # ── Speech Recognition ──────────────────────────────────────
+    # ── Speech Recognition (OpenAI Whisper) ─────────────────────
 
-    def listen(self, timeout=8, phrase_time_limit=None):
-        """Listen for speech and return recognized text, or None."""
-        if phrase_time_limit is None:
-            phrase_time_limit = self.config.get(
-                "speech_recognition", "phrase_time_limit", default=15
+    def _transcribe_whisper(self, audio_path, prompt=None):
+        """Transcribe audio using OpenAI Whisper API for high-accuracy recognition.
+
+        Optional *prompt* nudges the model (use for short wake phrases).
+        """
+        try:
+            api_key = self.config.get("api_keys", "openai", default="")
+            if not api_key:
+                return self._transcribe_google(audio_path)
+
+            import urllib.request
+            import json
+            import uuid
+
+            boundary = uuid.uuid4().hex
+            with open(audio_path, "rb") as f:
+                audio_data = f.read()
+
+            parts_tail = (
+                f"\r\n--{boundary}\r\n"
+                f'Content-Disposition: form-data; name="model"\r\n\r\n'
+                f"whisper-1"
+                f"\r\n--{boundary}\r\n"
+                f'Content-Disposition: form-data; name="language"\r\n\r\n'
+                f"en"
+            )
+            if prompt:
+                parts_tail += (
+                    f"\r\n--{boundary}\r\n"
+                    f'Content-Disposition: form-data; name="prompt"\r\n\r\n'
+                    f"{prompt}"
+                )
+            parts_tail += f"\r\n--{boundary}--\r\n"
+
+            body = (
+                f"--{boundary}\r\n"
+                f'Content-Disposition: form-data; name="file"; filename="audio.wav"\r\n'
+                f"Content-Type: audio/wav\r\n\r\n"
+            ).encode() + audio_data + parts_tail.encode()
+
+            req = urllib.request.Request(
+                "https://api.openai.com/v1/audio/transcriptions",
+                data=body,
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": f"multipart/form-data; boundary={boundary}",
+                },
             )
 
-        if _HAS_PYAUDIO:
-            return self._listen_pyaudio(timeout, phrase_time_limit)
-        return self._listen_sounddevice(timeout, phrase_time_limit)
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                result = json.loads(resp.read().decode())
 
-    def _listen_pyaudio(self, timeout, phrase_time_limit):
+            text = result.get("text", "").strip()
+            if text:
+                logger.info(f"Whisper heard: {text}")
+                return text
+            return None
+
+        except Exception as e:
+            logger.warning(f"Whisper API error, falling back to Google: {e}")
+            return self._transcribe_google(audio_path)
+
+    @staticmethod
+    def _standby_transcript_is_actionable(text):
+        """True if transcript might be the user (not obvious TV/noise spam)."""
+        if not text:
+            return False
+        t = text.lower().strip()
+        if len(t) < 2:
+            return False
+        junk = {
+            ".", "..", "...", "you", "hm", "hmm", "uh", "um", "yeah", "oh",
+        }
+        if t in junk:
+            return False
+        hints = (
+            "wake", "dog", "home", "brodie", "bigbrodie", "jarvis",
+            "hey", "hello", "hi,", "hi ", "yes",
+            "open", "close", "play", "what", "time", "weather", "read",
+            "send", "alarm", "spotify", "mail", "email", "news",
+        )
+        return any(h in t for h in hints)
+
+    def _wake_phrase_fuzzy_match(self, text, wake_phrase):
+        """True if every significant token of *wake_phrase* appears in *text* (Whisper-tolerant)."""
+        if not text or not wake_phrase:
+            return False
+        compact = re.sub(r"[^a-z0-9]", "", text.lower())
+        parts = []
+        for raw in wake_phrase.lower().split():
+            w = raw.strip(".,!?\"")
+            if w.endswith("'s"):
+                w = w[:-2]
+            elif w.endswith("'"):
+                w = w[:-1]
+            w = "".join(c for c in w if c.isalnum())
+            if not w:
+                continue
+            if len(w) < 2 and w != "up":
+                continue
+            parts.append(w)
+        if not parts:
+            return False
+        return all(p in compact for p in parts)
+
+    def _wake_passes_jarvis_gate(self, text):
+        """If enabled, only wake when transcript contains *Jarvis* (or common mis-hears)."""
+        if not self.config.get(
+            "behavior", "wake_requires_jarvis_keyword", default=True
+        ):
+            return True
+        t = (text or "").lower()
+        if "jarvis" in t:
+            return True
+        for a in self.config.get("behavior", "wake_jarvis_aliases", default=[]):
+            if isinstance(a, str) and a.strip() and a.strip().lower() in t:
+                logger.info(f"Wake gate: alias match '{a.strip().lower()}'")
+                return True
+        return False
+
+    def _transcribe_google(self, audio_path):
+        """Fallback: transcribe using Google's free speech API."""
+        try:
+            r = sr.Recognizer()
+            with sr.AudioFile(audio_path) as source:
+                audio = r.record(source)
+            return r.recognize_google(audio, language="en-US")
+        except (sr.UnknownValueError, sr.RequestError):
+            return None
+
+    def _record_audio(self, timeout=8, phrase_time_limit=15):
+        """Record audio from mic, return path to WAV file or None."""
+        if _HAS_PYAUDIO:
+            return self._record_pyaudio(timeout, phrase_time_limit)
+        return self._record_sounddevice(timeout, phrase_time_limit)
+
+    def _record_pyaudio(self, timeout, phrase_time_limit, for_wake=False):
         try:
             with sr.Microphone() as source:
+                if for_wake:
+                    self.recognizer.adjust_for_ambient_noise(source, duration=0.7)
+                    self.recognizer.energy_threshold = max(
+                        MIN_ENERGY_THRESHOLD,
+                        int(self.recognizer.energy_threshold),
+                    )
                 audio = self.recognizer.listen(
-                    source,
-                    timeout=timeout,
-                    phrase_time_limit=phrase_time_limit,
+                    source, timeout=timeout, phrase_time_limit=phrase_time_limit
                 )
-            text = self.recognizer.recognize_google(audio, language="en-US")
-            logger.info(f"Heard: {text}")
-            print(f"  \033[93m⟫ You:\033[0m {text}")
-            return text.strip()
+            tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+            tmp.write(audio.get_wav_data())
+            tmp.close()
+            return tmp.name
         except sr.WaitTimeoutError:
             return None
-        except sr.UnknownValueError:
-            return None
-        except sr.RequestError as e:
-            logger.error(f"Speech API error: {e}")
-            return None
         except Exception as e:
-            logger.error(f"Listen error: {e}")
+            logger.error(f"Record error: {e}")
             return None
 
-    def _listen_sounddevice(self, timeout, phrase_time_limit):
-        """Fallback: record with sounddevice, then recognize."""
+    def _record_sounddevice(self, timeout, phrase_time_limit):
         fs = 16000
         block_duration = 0.1
         block_size = int(fs * block_duration)
@@ -152,7 +279,6 @@ class JarvisVoice:
         def callback(indata, frame_count, time_info, status):
             nonlocal silent_blocks, speaking
             energy = np.sqrt(np.mean(indata ** 2))
-
             if energy > silence_threshold:
                 if not speaking:
                     speaking = True
@@ -180,23 +306,33 @@ class JarvisVoice:
             return None
 
         audio_data = np.concatenate(frames)
+        tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+        wav_io.write(tmp.name, fs, (audio_data * 32767).astype(np.int16))
+        tmp.close()
+        return tmp.name
 
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-            tmp_path = tmp.name
-            wav_io.write(tmp_path, fs, (audio_data * 32767).astype(np.int16))
+    def listen(self, timeout=8, phrase_time_limit=None):
+        """Listen for speech and return recognized text using Whisper API."""
+        if phrase_time_limit is None:
+            phrase_time_limit = self.config.get(
+                "speech_recognition", "phrase_time_limit", default=15
+            )
+
+        audio_path = self._record_audio(timeout, phrase_time_limit)
+        if not audio_path:
+            return None
 
         try:
-            r = sr.Recognizer()
-            with sr.AudioFile(tmp_path) as source:
-                audio = r.record(source)
-            text = r.recognize_google(audio, language="en-US")
-            logger.info(f"Heard: {text}")
-            print(f"  \033[93m⟫ You:\033[0m {text}")
-            return text.strip()
-        except (sr.UnknownValueError, sr.RequestError):
+            text = self._transcribe_whisper(audio_path)
+            if text:
+                print(f"  \033[93m⟫ You:\033[0m {text}")
+                return text.strip()
             return None
         finally:
-            os.unlink(tmp_path)
+            try:
+                os.unlink(audio_path)
+            except OSError:
+                pass
 
     # ── Wake Word Detection ─────────────────────────────────────
 
@@ -215,25 +351,68 @@ class JarvisVoice:
 
     def _wake_pyaudio(self, wake_words, phrase_limit):
         try:
-            with sr.Microphone() as source:
-                audio = self.recognizer.listen(
-                    source, timeout=None, phrase_time_limit=phrase_limit
-                )
-            print("\r  \033[2m⟫ Heard something, checking...\033[0m", end="", flush=True)
-            text = self.recognizer.recognize_google(audio, language="en-US").lower()
+            wake_timeout = self.config.get(
+                "speech_recognition", "wake_listen_timeout", default=12
+            )
+            audio_path = self._record_pyaudio(
+                timeout=wake_timeout,
+                phrase_time_limit=phrase_limit,
+                for_wake=True,
+            )
+            if not audio_path:
+                return False
+
+            wp = " ".join(wake_words) if wake_words else "Jarvis"
+            wake_prompt = f"{wp}. Hey Jarvis. Yes Jarvis."
+            text = self._transcribe_whisper(audio_path, prompt=wake_prompt)
+            try:
+                os.unlink(audio_path)
+            except OSError:
+                pass
+
+            if not text:
+                return False
+
+            text = text.lower().strip().rstrip(".")
             logger.info(f"Wake check heard: '{text}'")
-            print(f"\r  \033[2m⟫ Heard: \"{text}\"\033[0m" + " " * 20)
-            if any(w in text for w in wake_words):
+            if self._standby_transcript_is_actionable(text):
+                print(f"\r  \033[2m⟫ Heard: \"{text}\"\033[0m" + " " * 20)
+
+            for w in wake_words:
+                if w in text:
+                    if self._wake_passes_jarvis_gate(text):
+                        return True
+                    logger.info("Wake rejected: need 'jarvis' in transcript")
+                    return False
+
+            if (
+                len(wake_words) == 1
+                and wake_words[0].lower().strip() == "jarvis"
+                and self._wake_passes_jarvis_gate(text)
+            ):
+                logger.info("Wake: Jarvis keyword or alias (e.g. jervis)")
                 return True
-            return False
-        except sr.UnknownValueError:
-            return False
-        except sr.WaitTimeoutError:
-            return False
-        except sr.RequestError as e:
-            logger.error(f"Wake word API error: {e}")
-            print(f"\n  \033[91m⟫ Speech API error — check internet connection\033[0m")
-            time.sleep(3)
+
+            for phrase in wake_words:
+                if self._wake_phrase_fuzzy_match(text, phrase):
+                    logger.info(f"Fuzzy wake match (tokens): '{phrase}' ~ '{text}'")
+                    if self._wake_passes_jarvis_gate(text):
+                        return True
+                    logger.info("Wake rejected: need 'jarvis' in transcript")
+                    return False
+
+            # Legacy mis-hears for "wake up dog"
+            legacy = [
+                "wake up doug", "wake up doc", "wake up dawg", "wake a dog",
+                "wake up dug", "wake up dark", "wake of dog", "wakeup dog",
+            ]
+            for trigger in legacy:
+                if trigger in text:
+                    logger.info(f"Fuzzy wake match: '{trigger}' in '{text}'")
+                    if self._wake_passes_jarvis_gate(text):
+                        return True
+                    return False
+
             return False
         except Exception as e:
             logger.error(f"Wake word error: {e}")
@@ -242,9 +421,14 @@ class JarvisVoice:
 
     def _wake_sounddevice(self, wake_words, phrase_limit):
         text = self._listen_sounddevice(timeout=30, phrase_time_limit=phrase_limit)
-        if text:
-            return any(w in text.lower() for w in wake_words)
-        return False
+        if not text:
+            return False
+        t = text.lower()
+        if not self._wake_passes_jarvis_gate(t):
+            return False
+        if len(wake_words) == 1 and wake_words[0].lower().strip() == "jarvis":
+            return True
+        return any(w in t for w in wake_words)
 
     # ── Clap Detection ──────────────────────────────────────────
 
@@ -325,49 +509,141 @@ class JarvisVoice:
             return self._wait_for_either()
 
     def _wait_for_either(self):
-        """Listen for clap OR wake word simultaneously using threads."""
-        import threading
+        """Single audio stream that detects both claps AND speech.
 
-        result = {"triggered": False, "source": None}
-        stop_event = threading.Event()
+        Monitors mic continuously. Sharp energy spikes are checked for
+        double-clap pattern. Sustained sound above threshold is recorded
+        and sent to Google for wake-word recognition. Nothing gets missed.
+        """
+        fs = 16000
+        block_ms = 30
+        block_size = int(fs * block_ms / 1000)
 
-        def clap_worker():
-            while not stop_event.is_set() and not result["triggered"]:
-                if self.listen_for_clap():
-                    result["triggered"] = True
-                    result["source"] = "clap"
-                    stop_event.set()
-                    return
-                if stop_event.is_set():
-                    return
+        clap_cfg = self.config.get("clap", default={})
+        spike_multiplier = clap_cfg.get("spike_multiplier", 8.0)
+        min_gap = clap_cfg.get("min_gap", 0.15)
+        max_gap = clap_cfg.get("max_gap", 0.8)
+        wake_words = self.config.get(
+            "wake_words", default=["wake up", "hey jarvis", "jarvis"]
+        )
 
-        def voice_worker():
-            while not stop_event.is_set() and not result["triggered"]:
-                if self.listen_for_wake_word():
-                    result["triggered"] = True
-                    result["source"] = "voice"
-                    stop_event.set()
-                    return
-                if stop_event.is_set():
-                    return
+        ambient_levels = []
+        clap_times = []
+        speech_frames = []
+        speech_start = None
+        speech_threshold = max(0.01, self.recognizer.energy_threshold / 32767.0)
+        silent_blocks = 0
+        max_silent = int(1.2 / (block_ms / 1000))
+        max_speech = float(
+            self.config.get("speech_recognition", "wake_max_speech_seconds", default=8.0)
+        )
 
-        # Only one can use the mic at a time, so alternate between them.
-        # Clap detection is fast (10s max) and doesn't need the internet.
-        # Wake word needs the mic + Google API.
-        # Strategy: try clap first (quick, offline), then voice.
-        while not result["triggered"]:
-            if self.listen_for_clap():
-                result["triggered"] = True
-                result["source"] = "clap"
-                break
-            if self.listen_for_wake_word():
-                result["triggered"] = True
-                result["source"] = "voice"
-                break
+        result = {"type": None}
 
-        if result["triggered"]:
-            logger.info(f"Wake trigger: {result['source']}")
-        return result["triggered"]
+        def callback(indata, frame_count, time_info, status):
+            nonlocal speech_start, silent_blocks
+            if result["type"]:
+                return
+
+            energy = np.sqrt(np.mean(indata ** 2))
+            now = time.time()
+
+            ambient_levels.append(energy)
+            if len(ambient_levels) > 150:
+                ambient_levels.pop(0)
+            ambient = np.median(ambient_levels) if len(ambient_levels) > 20 else 0.005
+            clap_threshold = max(0.02, ambient * spike_multiplier)
+
+            if energy > clap_threshold:
+                if not clap_times or (now - clap_times[-1]) > min_gap:
+                    clap_times.append(now)
+                    if len(clap_times) >= 2:
+                        gap = clap_times[-1] - clap_times[-2]
+                        if min_gap <= gap <= max_gap:
+                            result["type"] = "clap"
+                            return
+
+            while clap_times and (now - clap_times[0]) > max_gap + 0.5:
+                clap_times.pop(0)
+
+            if energy > speech_threshold:
+                if speech_start is None:
+                    speech_start = now
+                silent_blocks = 0
+                speech_frames.append(indata.copy())
+            elif speech_start is not None:
+                silent_blocks += 1
+                speech_frames.append(indata.copy())
+                if silent_blocks >= max_silent:
+                    duration = now - speech_start
+                    if duration >= 0.4:
+                        result["type"] = "speech"
+                    else:
+                        speech_frames.clear()
+                        speech_start = None
+                        silent_blocks = 0
+
+            if speech_start and (now - speech_start) > max_speech:
+                result["type"] = "speech"
+
+        try:
+            with sd.InputStream(
+                samplerate=fs, channels=1, blocksize=block_size, callback=callback
+            ):
+                while not result["type"]:
+                    time.sleep(0.02)
+        except Exception as e:
+            logger.error(f"Wake listener error: {e}")
+            return False
+
+        if result["type"] == "clap":
+            logger.info("Double-clap detected!")
+            print(f"\r  \033[92m⟫ *clap clap* detected\033[0m" + " " * 20)
+            return True
+
+        if result["type"] == "speech" and speech_frames:
+            audio_data = np.concatenate(speech_frames)
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+                tmp_path = tmp.name
+                wav_io.write(tmp_path, fs, (audio_data * 32767).astype(np.int16))
+            try:
+                wp = " ".join(wake_words) if wake_words else "Jarvis"
+                wake_prompt = f"{wp}. Hey Jarvis. Yes Jarvis."
+                text = self._transcribe_whisper(tmp_path, prompt=wake_prompt)
+                if text:
+                    text = text.lower().strip().rstrip(".")
+                    logger.info(f"Wake check heard: '{text}'")
+                    if self._standby_transcript_is_actionable(text):
+                        print(f"\r  \033[2m⟫ Heard: \"{text}\"\033[0m" + " " * 20)
+                    if any(w in text for w in wake_words):
+                        if self._wake_passes_jarvis_gate(text):
+                            logger.info("Wake word detected!")
+                            return True
+                    if (
+                        len(wake_words) == 1
+                        and wake_words[0].lower().strip() == "jarvis"
+                        and self._wake_passes_jarvis_gate(text)
+                    ):
+                        logger.info("Wake word detected (Jarvis / alias)!")
+                        return True
+                    for phrase in wake_words:
+                        if self._wake_phrase_fuzzy_match(text, phrase):
+                            if self._wake_passes_jarvis_gate(text):
+                                logger.info("Wake word detected (fuzzy tokens)!")
+                                return True
+                    for trigger in ("wake up dog", "wake up doug", "wakeup dog"):
+                        if trigger in text and self._wake_passes_jarvis_gate(text):
+                            logger.info(f"Wake fuzzy: {trigger}")
+                            return True
+            except Exception:
+                pass
+            finally:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+
+        return False
 
     # ── Calibration ─────────────────────────────────────────────
 
@@ -384,7 +660,8 @@ class JarvisVoice:
                 self.recognizer.energy_threshold = noise_level * 32767 * 1.5
 
             self.recognizer.energy_threshold = max(
-                MIN_ENERGY_THRESHOLD, self.recognizer.energy_threshold
+                MIN_ENERGY_THRESHOLD,
+                self.recognizer.energy_threshold,
             )
 
             print(
