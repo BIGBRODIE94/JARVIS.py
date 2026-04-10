@@ -30,11 +30,11 @@ DEFAULT_CONFIG = {
         "volume": 1.0
     },
     "speech_recognition": {
-        "energy_threshold": 120,
+        "energy_threshold": 150,
         "pause_threshold": 0.8,
         "phrase_time_limit": 15,
-        "wake_phrase_limit": 8,
-        "wake_listen_timeout": 20,
+        "wake_phrase_limit": 5,
+        "wake_listen_timeout": 15,
         "wake_max_speech_seconds": 8.0
     },
     "wake_method": "voice",
@@ -51,7 +51,6 @@ DEFAULT_CONFIG = {
             "Welcome Home sir congratulations on the opening ceremony"
         ),
         "wake_requires_jarvis_keyword": True,
-        "wake_jarvis_aliases": ["jervis", "jarvus"],
         "periodic_status_enabled": False,
         "follow_up_probability": 0.0,
         "voice_acknowledge_before_actions": False,

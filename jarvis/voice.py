@@ -212,19 +212,12 @@ class JarvisVoice:
         return all(p in compact for p in parts)
 
     def _wake_passes_jarvis_gate(self, text):
-        """If enabled, only wake when transcript contains *Jarvis* (or common mis-hears)."""
+        """If enabled, only treat as a wake when the user clearly said *Jarvis*."""
         if not self.config.get(
             "behavior", "wake_requires_jarvis_keyword", default=True
         ):
             return True
-        t = (text or "").lower()
-        if "jarvis" in t:
-            return True
-        for a in self.config.get("behavior", "wake_jarvis_aliases", default=[]):
-            if isinstance(a, str) and a.strip() and a.strip().lower() in t:
-                logger.info(f"Wake gate: alias match '{a.strip().lower()}'")
-                return True
-        return False
+        return "jarvis" in (text or "").lower()
 
     def _transcribe_google(self, audio_path):
         """Fallback: transcribe using Google's free speech API."""
@@ -242,15 +235,9 @@ class JarvisVoice:
             return self._record_pyaudio(timeout, phrase_time_limit)
         return self._record_sounddevice(timeout, phrase_time_limit)
 
-    def _record_pyaudio(self, timeout, phrase_time_limit, for_wake=False):
+    def _record_pyaudio(self, timeout, phrase_time_limit):
         try:
             with sr.Microphone() as source:
-                if for_wake:
-                    self.recognizer.adjust_for_ambient_noise(source, duration=0.7)
-                    self.recognizer.energy_threshold = max(
-                        MIN_ENERGY_THRESHOLD,
-                        int(self.recognizer.energy_threshold),
-                    )
                 audio = self.recognizer.listen(
                     source, timeout=timeout, phrase_time_limit=phrase_time_limit
                 )
@@ -355,15 +342,12 @@ class JarvisVoice:
                 "speech_recognition", "wake_listen_timeout", default=12
             )
             audio_path = self._record_pyaudio(
-                timeout=wake_timeout,
-                phrase_time_limit=phrase_limit,
-                for_wake=True,
+                timeout=wake_timeout, phrase_time_limit=phrase_limit
             )
             if not audio_path:
                 return False
 
-            wp = " ".join(wake_words) if wake_words else "Jarvis"
-            wake_prompt = f"{wp}. Hey Jarvis. Yes Jarvis."
+            wake_prompt = " ".join(wake_words) if wake_words else "Wake up."
             text = self._transcribe_whisper(audio_path, prompt=wake_prompt)
             try:
                 os.unlink(audio_path)
@@ -384,14 +368,6 @@ class JarvisVoice:
                         return True
                     logger.info("Wake rejected: need 'jarvis' in transcript")
                     return False
-
-            if (
-                len(wake_words) == 1
-                and wake_words[0].lower().strip() == "jarvis"
-                and self._wake_passes_jarvis_gate(text)
-            ):
-                logger.info("Wake: Jarvis keyword or alias (e.g. jervis)")
-                return True
 
             for phrase in wake_words:
                 if self._wake_phrase_fuzzy_match(text, phrase):
@@ -426,8 +402,6 @@ class JarvisVoice:
         t = text.lower()
         if not self._wake_passes_jarvis_gate(t):
             return False
-        if len(wake_words) == 1 and wake_words[0].lower().strip() == "jarvis":
-            return True
         return any(w in t for w in wake_words)
 
     # ── Clap Detection ──────────────────────────────────────────
@@ -607,8 +581,9 @@ class JarvisVoice:
                 tmp_path = tmp.name
                 wav_io.write(tmp_path, fs, (audio_data * 32767).astype(np.int16))
             try:
-                wp = " ".join(wake_words) if wake_words else "Jarvis"
-                wake_prompt = f"{wp}. Hey Jarvis. Yes Jarvis."
+                wake_prompt = (
+                    " ".join(wake_words) if wake_words else "Wake up."
+                )
                 text = self._transcribe_whisper(tmp_path, prompt=wake_prompt)
                 if text:
                     text = text.lower().strip().rstrip(".")
@@ -619,13 +594,6 @@ class JarvisVoice:
                         if self._wake_passes_jarvis_gate(text):
                             logger.info("Wake word detected!")
                             return True
-                    if (
-                        len(wake_words) == 1
-                        and wake_words[0].lower().strip() == "jarvis"
-                        and self._wake_passes_jarvis_gate(text)
-                    ):
-                        logger.info("Wake word detected (Jarvis / alias)!")
-                        return True
                     for phrase in wake_words:
                         if self._wake_phrase_fuzzy_match(text, phrase):
                             if self._wake_passes_jarvis_gate(text):

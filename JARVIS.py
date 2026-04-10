@@ -113,6 +113,11 @@ class Jarvis:
     def setup(self):
         """Run setup if not configured. Returns True if setup was needed."""
         if not self.config.is_configured:
+            if self.daemon_mode:
+                self.logger.error(
+                    "JARVIS is not configured. Run: python3 Jarvis.py --setup"
+                )
+                return True
             self.config.setup_wizard()
             return True
         return False
@@ -141,20 +146,26 @@ class Jarvis:
             print(f"  {GREEN}{BOLD}◉ ONLINE{RESET}")
             print(f"{DIVIDER}")
 
-        greeting = self.commands.get_greeting()
-        wake_msg = f"{greeting}. All systems online and ready."
-
-        if self.config.get("behavior", "announce_time", default=True):
-            wake_msg += f" It's currently {self.commands.get_time()}."
-
-        wake_msg += " How may I assist you?"
+        custom = (
+            self.config.get("behavior", "custom_wake_speech", default="") or ""
+        ).strip()
+        if custom:
+            wake_msg = custom
+        else:
+            greeting = self.commands.get_greeting()
+            wake_msg = f"{greeting}. All systems online and ready."
+            if self.config.get("behavior", "announce_time", default=True):
+                wake_msg += f" It's currently {self.commands.get_time()}."
+            wake_msg += " How may I assist you?"
         self.voice.speak(wake_msg)
 
-    def _deactivate(self):
+    def _deactivate(self, silent=False):
         self.active = False
-        self.voice.speak(
-            "Going into standby mode. Just say 'wake up' when you need me."
-        )
+        if not silent:
+            phrase = self.config.wake_banner_text()
+            self.voice.speak(
+                f"Going into standby mode. Just say {phrase} when you need me."
+            )
         if not self.daemon_mode:
             print(f"\n{DIVIDER}")
             print(f"  {DIM}◯ STANDBY — Listening for wake word...{RESET}")
@@ -174,8 +185,30 @@ class Jarvis:
             self._deactivate()
             return False
 
-        if any(cmd in t for cmd in ["shut down", "shutdown", "exit", "quit", "goodbye"]):
+        jarvis_shutdown_phrases = [
+            "jarvis shut down", "jarvis shutdown", "shut down jarvis",
+            "shutdown jarvis", "jarvis goodbye", "goodbye jarvis",
+            "jarvis exit", "exit jarvis", "jarvis quit",
+            "completely shut down", "power down",
+        ]
+        words = t.split()
+        is_jarvis_shutdown = (
+            any(phrase in t for phrase in jarvis_shutdown_phrases)
+            or (t in ["shut down", "shutdown", "exit", "quit", "goodbye"])
+        )
+        is_app_action = any(
+            w in words for w in ["open", "close", "quit", "launch", "start", "kill"]
+        ) and len(words) > 1 and not is_jarvis_shutdown
+
+        if is_jarvis_shutdown and not is_app_action:
             name = self.config.get("user_name", default="sir")
+            if self.daemon_mode:
+                self.voice.speak(
+                    f"Going into deep standby, {name}. "
+                    f"I'll still be listening. Just say {self.config.wake_banner_text()}."
+                )
+                self._deactivate(silent=True)
+                return False
             self.voice.speak(f"Powering down all systems. Goodbye, {name}.")
             self.running = False
             return False
@@ -209,7 +242,9 @@ class Jarvis:
                 )
                 return True
 
-        if self.brain.is_expensive_action(text):
+        if self.config.get(
+            "behavior", "voice_acknowledge_before_actions", default=False
+        ) and self.brain.is_expensive_action(text):
             self.voice.acknowledge()
 
         response = self.brain.think(text)
@@ -223,6 +258,10 @@ class Jarvis:
 
     def _maybe_periodic_status(self):
         """Announce a compact status report roughly once per hour while active."""
+        if not self.config.get(
+            "behavior", "periodic_status_enabled", default=False
+        ):
+            return
         now = time.time()
         if self.active and (now - self.last_status_time) >= STATUS_INTERVAL:
             self.last_status_time = now
@@ -265,15 +304,10 @@ class Jarvis:
         """Run with full voice interaction — sleep/wake cycle."""
         self.voice.calibrate()
 
-        wake_method = self.config.get("wake_method", default="both")
         if not self.daemon_mode:
+            display_phrase = self.config.wake_banner_text()
             print(f"\n{DIVIDER}")
-            if wake_method == "clap":
-                print(f"  {DIM}◯ STANDBY — {GREEN}Double-clap{RESET}{DIM} to activate{RESET}")
-            elif wake_method == "voice":
-                print(f"  {DIM}◯ STANDBY — Say '{GREEN}Wake Up{RESET}{DIM}' or '{GREEN}Hey Jarvis{RESET}{DIM}' to activate{RESET}")
-            else:
-                print(f"  {DIM}◯ STANDBY — {GREEN}Double-clap{RESET}{DIM} or say '{GREEN}Hey Jarvis{RESET}{DIM}' to activate{RESET}")
+            print(f"  {DIM}◯ STANDBY — Say '{GREEN}{display_phrase}{RESET}{DIM}' to activate{RESET}")
             print(f"{DIVIDER}\n")
 
         while self.running:
@@ -290,11 +324,15 @@ class Jarvis:
                         "behavior", "sleep_after_idle", default=180
                     )
                     if time.time() - self.idle_timer > idle_limit:
-                        self.voice.speak(
-                            "I'll go into standby since you seem busy. "
-                            "Just say 'wake up' when you need me."
+                        silent_idle = self.config.get(
+                            "behavior", "silent_idle_standby", default=True
                         )
-                        self._deactivate()
+                        if not silent_idle:
+                            self.voice.speak(
+                                "I'll go into standby since you seem busy. "
+                                f"Just say {self.config.wake_banner_text()} when you need me."
+                            )
+                        self._deactivate(silent=silent_idle)
                         continue
 
                     if not self.daemon_mode:
@@ -305,12 +343,16 @@ class Jarvis:
                     if text:
                         wake_words = self.config.get(
                             "wake_words",
-                            default=["wake up", "hey jarvis", "jarvis"],
+                            default=["jarvis"],
                         )
-                        if text.lower().strip() in wake_words:
-                            self.voice.speak(
-                                "I'm already here, sir. What do you need?"
-                            )
+                        lw = text.lower().strip()
+                        if lw in wake_words:
+                            if self.config.get(
+                                "behavior", "speak_on_repeat_wake", default=False
+                            ):
+                                self.voice.speak(
+                                    "I'm already here, sir. What do you need?"
+                                )
                             continue
 
                         if not self._process_input(text):
@@ -379,11 +421,22 @@ def main():
         "--text", "-t", action="store_true",
         help="Text-only mode (type commands instead of speaking)",
     )
+    parser.add_argument(
+        "--setup-email", action="store_true",
+        help="Authenticate with Microsoft Outlook for email access",
+    )
     args = parser.parse_args()
 
     if args.setup:
         config = JarvisConfig()
         config.setup_wizard()
+        return
+
+    if args.setup_email:
+        config = JarvisConfig()
+        cmds = JarvisCommands(config)
+        result = cmds.setup_outlook_auth()
+        print(f"\n  {result}\n")
         return
 
     jarvis = Jarvis(daemon_mode=args.daemon, text_mode=args.text)
